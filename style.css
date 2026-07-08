@@ -161,6 +161,7 @@ body {
   border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
   border-radius: 10px; padding: 9px 10px; font: inherit; font-size: 15px; min-width: 0;
 }
+.fx-form select { flex: 0 0 132px; }
 .fx-form input { flex: 1; }
 .fx-note { color: var(--ink-2); font-size: 13.5px; margin-top: 4px; }
 

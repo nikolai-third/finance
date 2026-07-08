@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Мои финансы</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💸</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <h1>💸 Мои финансы</h1>
+    <div class="period-note" id="periodNote"></div>
+  </header>
+
+  <nav class="filters" id="filters">
+    <div class="chip-row" id="rangeChips"></div>
+    <div class="search-row">
+      <input type="search" id="search" placeholder="Поиск по операциям…" autocomplete="off">
+      <select id="kindFilter" aria-label="Тип операций">
+        <option value="spending">Траты</option>
+        <option value="income">Поступления</option>
+        <option value="transfer">Переводы и копилка</option>
+        <option value="all">Все операции</option>
+      </select>
+    </div>
+  </nav>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 id="chartTitle">Траты по месяцам</h2>
+    </div>
+    <div class="chart-wrap"><svg id="chart" role="img" aria-label="Помесячная диаграмма"></svg></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Категории</h2>
+      <button class="btn ghost" id="addCatBtn">＋ Своя категория</button>
+    </div>
+    <div class="cat-list" id="catList"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 id="txTitle">Операции</h2>
+      <button class="btn ghost" id="csvBtn">⬇ CSV</button>
+    </div>
+    <div class="tx-list" id="txList"></div>
+    <button class="btn wide" id="moreBtn" hidden>Показать ещё</button>
+  </section>
+
+  <footer class="foot">
+    Данные: справка Т-Банка 08.01.2026 – 08.07.2026 · категории и правки хранятся в вашем браузере
+  </footer>
+</div>
+
+<div class="sheet-backdrop" id="backdrop" hidden></div>
+
+<div class="sheet" id="txSheet" hidden role="dialog" aria-modal="true">
+  <div class="sheet-grip"></div>
+  <div class="sheet-body" id="txSheetBody"></div>
+</div>
+
+<div class="sheet" id="catSheet" hidden role="dialog" aria-modal="true">
+  <div class="sheet-grip"></div>
+  <div class="sheet-body" id="catSheetBody"></div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<div class="lock" id="lock">
+  <div class="lock-card">
+    <div class="lock-ico">🔐</div>
+    <h2>Данные зашифрованы</h2>
+    <p class="sub">Введите пароль — расшифровка происходит только в вашем браузере, на сервер ничего не уходит.</p>
+    <input type="password" id="pw" placeholder="Пароль" autocomplete="current-password" enterkeyhint="go">
+    <label class="remember"><input type="checkbox" id="rememberPw" checked> Запомнить на этом устройстве</label>
+    <button class="btn primary" id="unlockBtn">Открыть</button>
+    <div class="lock-err" id="lockErr"></div>
+  </div>
+</div>
+
+<script src="data.enc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

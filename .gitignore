@@ -1,0 +1,8 @@
+# исходная выписка и расшифрованные данные — не публиковать
+*.pdf
+data.js
+transactions.csv
+
+.DS_Store
+debug.html
+__pycache__/

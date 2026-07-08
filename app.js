@@ -273,11 +273,16 @@ function cashBalances() {
   for (const [cur, e] of Object.entries(load(LS.cash, {}))) {
     out[cur] = { amt: e.amt, asOf: e.asOf || 0 };
   }
-  for (const t of manualTxs) {
-    if ((t.src || "account") !== "cash") continue;
-    const cur = t.cur || "RUB";
+  const add = (cur, ts, delta) => {
     const e = out[cur] || (out[cur] = { amt: 0, asOf: 0 });
-    if (tsOf(t) > e.asOf) e.amt = Math.round((e.amt + t.amount) * 100) / 100;
+    if (ts > e.asOf) e.amt = Math.round((e.amt + delta) * 100) / 100;
+  };
+  for (const t of manualTxs) {
+    const ts = tsOf(t);
+    if ((t.src || "account") === "cash") add(t.cur || "RUB", ts, t.amount);
+    // конвертация: полученная валюта прибавляется к наличным
+    const fx = fxMap[txKey(t)];
+    if (fx && fx.amt > 0) add(fx.cur, ts, fx.amt);
   }
   return out;
 }
@@ -1024,7 +1029,8 @@ function showFxForm(wrap, t, c, triage) {
   };
   form.append(sel, inp, ok);
   wrap.append(form,
-    el("div", "fx-note", "В какую сумму и валюту в итоге конвертировался перевод"));
+    el("div", "fx-note",
+      "Сколько валюты получено — прибавится к наличным этой валюты"));
   inp.focus();
 }
 
@@ -1279,11 +1285,39 @@ function openManualTxForm() {
     }
     catSel.append(grp);
   }
+
+  // покупка/снятие валюты: сколько и какой валюты получено на руки
+  const fxWrap = el("div");
+  fxWrap.append(el("label", "", "Получено на руки"));
+  const fxRow = el("div", "fx-form");
+  fxRow.style.marginTop = "0";
+  const fxSel = el("select");
+  for (const [code, sym] of FX_CURRENCIES) {
+    const o = el("option", "", code === sym ? code : `${code} ${sym}`);
+    o.value = code;
+    fxSel.append(o);
+  }
+  fxSel.value = "USD";
+  const fxAmt = el("input");
+  fxAmt.type = "number";
+  fxAmt.step = "0.01";
+  fxAmt.min = "0";
+  fxAmt.placeholder = "Сколько получено";
+  fxRow.append(fxSel, fxAmt);
+  fxWrap.append(fxRow,
+    el("div", "fx-note", "Прибавится к наличным этой валюты"));
+  form.append(fxWrap);
+
+  const isFxCat = () => !!(catById(catSel.value) || {}).fx;
+  const syncFxVisibility = () => { fxWrap.hidden = !isFxCat(); };
+  catSel.onchange = syncFxVisibility;
   signSel.onchange = () => {
     const k = signSel.value === "+" ? "income" : "spending";
     const first = allCats().find((c) => (c.kind || "spending") === k);
     if (first) catSel.value = first.id;
+    syncFxVisibility();
   };
+  syncFxVisibility();
   body.append(form);
 
   const actions = el("div", "sheet-actions");
@@ -1292,7 +1326,13 @@ function openManualTxForm() {
     const amt = parseFloat(amtIn.value);
     if (!(amt > 0)) { amtIn.focus(); return; }
     if (!descIn.value.trim()) { descIn.focus(); return; }
-    manualTxs.unshift({
+    let fx = null;
+    if (isFxCat()) {
+      const fa = parseFloat(fxAmt.value);
+      if (!(fa > 0)) { fxAmt.focus(); return; }
+      fx = { cur: fxSel.value, amt: fa };
+    }
+    const tx = {
       id: "m" + Date.now().toString(36),
       date: dateIn.value || new Date().toISOString().slice(0, 10),
       time: null,
@@ -1301,11 +1341,17 @@ function openManualTxForm() {
       cat: catSel.value,
       src: srcSel.value,
       cur: srcSel.value === "cash" ? curSel.value : "RUB",
-    });
+    };
+    manualTxs.unshift(tx);
+    if (fx) {
+      fxMap[txKey(tx)] = fx;
+      save(LS.fx, fxMap);
+    }
     save(LS.manual, manualTxs);
     rebuildTxs();
     closeSheets();
-    toast("Операция добавлена");
+    toast(fx ? `Операция добавлена · +${fxStr(fx)} к наличным`
+             : "Операция добавлена");
     renderAll();
   };
   actions.append(ok);

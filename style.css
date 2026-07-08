@@ -56,9 +56,23 @@ body {
 }
 .app { max-width: 720px; margin: 0 auto; padding: 12px 12px 32px; }
 
-.topbar { display: flex; align-items: baseline; justify-content: space-between; padding: 8px 4px; flex-wrap: wrap; gap: 4px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 4px; flex-wrap: wrap; gap: 4px; }
 .topbar h1 { font-size: 22px; font-weight: 700; }
+.top-right { display: flex; align-items: center; gap: 10px; }
 .period-note { color: var(--ink-3); font-size: 13px; }
+.sync-btn {
+  width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--surface-1); font-size: 16px; cursor: pointer; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.sync-btn.off { color: var(--ink-3); }
+.sync-btn.ok { color: var(--good); }
+.sync-btn.error { color: var(--s6); border-color: var(--s6); }
+.sync-btn.syncing { color: var(--accent); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.sync-status { font-size: 13.5px; margin-top: 10px; }
+.sync-status.ok { color: var(--good); }
+.sync-status.error { color: var(--s6); }
 
 /* Фильтры */
 .filters { position: sticky; top: 0; z-index: 20; background: var(--page); padding: 8px 0; }

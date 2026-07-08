@@ -42,11 +42,25 @@ function plur(n, one, few, many) {
 }
 const plurOps = (n) => plur(n, "операция", "операции", "операций");
 
+/* эти ключи уезжают в зашифрованный слепок на GitHub при синхронизации */
+const SYNC_KEYS = [LS.cats, LS.catEdits, LS.overrides, LS.fx, LS.manual,
+  LS.cash, LS.account, LS.roundup];
+const LS_TOKEN = "fin.ghToken";
+const LS_LASTEDIT = "fin.lastEdit";
+
+let suppressSync = false;
+
 function load(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
   catch { return fallback; }
 }
-function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+function save(key, val) {
+  localStorage.setItem(key, JSON.stringify(val));
+  if (!suppressSync && SYNC_KEYS.includes(key)) {
+    localStorage.setItem(LS_LASTEDIT, String(Date.now()));
+    scheduleSyncPush();
+  }
+}
 
 /* ---------- данные (заполняются после расшифровки) ---------- */
 
@@ -1364,6 +1378,8 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheets(); });
 const LS_PW = "fin.pw";
 const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
+let stateKey = null; // тот же ключ шифрует слепок настроек для синхронизации
+
 async function decryptData(password) {
   const enc = new TextEncoder();
   const km = await crypto.subtle.importKey(
@@ -1371,11 +1387,252 @@ async function decryptData(password) {
   const key = await crypto.subtle.deriveKey(
     { name: "PBKDF2", salt: b64(ENC_DATA.salt), iterations: ENC_DATA.iter,
       hash: "SHA-256" },
-    km, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    km, { name: "AES-GCM", length: 256 }, false, ["decrypt", "encrypt"]);
   const pt = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: b64(ENC_DATA.iv) }, key, b64(ENC_DATA.ct));
+  stateKey = key;
   return JSON.parse(new TextDecoder().decode(pt));
 }
+
+/* ---------- синхронизация между устройствами через GitHub ----------
+   Слепок настроек (операции, категории, остатки) шифруется тем же ключом,
+   что и данные, и кладётся коммитом в этот же репозиторий: state.enc.json.
+   Устройства сверяются по updatedAt — побеждает последняя запись. */
+
+const SYNC_PATH = "state.enc.json";
+const SYNC_BRANCH = "sync-state"; // отдельная ветка, чтобы не дёргать Pages
+const REPO = localStorage.getItem("fin.syncRepo") || (() => {
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+  const seg = location.pathname.split("/").filter(Boolean)[0];
+  return m && seg ? `${m[1]}/${seg}` : "nikolai-third/finance";
+})();
+
+let syncSha = null;
+let syncTimer = null;
+let syncBusy = false;
+
+const ghToken = () => (localStorage.getItem(LS_TOKEN) || "").trim();
+
+function setSyncStatus(cls, note) {
+  const b = $("#syncBtn");
+  b.className = "sync-btn " + cls;
+  b.dataset.note = note || "";
+}
+
+function b64e(buf) {
+  const u = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < u.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function collectState() {
+  const s = { updatedAt: Number(localStorage.getItem(LS_LASTEDIT) || 0) };
+  for (const k of SYNC_KEYS) s[k] = load(k, null);
+  return s;
+}
+
+function applyState(s) {
+  suppressSync = true;
+  try {
+    for (const k of SYNC_KEYS) {
+      if (s[k] === null || s[k] === undefined) localStorage.removeItem(k);
+      else save(k, s[k]);
+    }
+  } finally { suppressSync = false; }
+  customCats = load(LS.cats, []);
+  catEdits = load(LS.catEdits, {});
+  overrides = load(LS.overrides, {});
+  fxMap = load(LS.fx, {});
+  manualTxs = load(LS.manual, []);
+  roundupOn = load(LS.roundup, true);
+  $("#roundupToggle").checked = roundupOn;
+  rebuildTxs();
+}
+
+async function encryptState(obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, stateKey,
+    new TextEncoder().encode(JSON.stringify(obj)));
+  return { v: 1, iv: b64e(iv), ct: b64e(ct), updatedAt: obj.updatedAt };
+}
+
+async function decryptState(file) {
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: b64(file.iv) }, stateKey, b64(file.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+const ghHeaders = () => ({
+  Authorization: "Bearer " + ghToken(),
+  Accept: "application/vnd.github+json",
+});
+
+async function ghGetState() {
+  const r = await fetch(
+    `https://api.github.com/repos/${REPO}/contents/${SYNC_PATH}?ref=${SYNC_BRANCH}`,
+    { headers: ghHeaders(), cache: "no-store" });
+  if (r.status === 404) { syncSha = null; return null; }
+  if (!r.ok) throw new Error("GitHub " + r.status);
+  const j = await r.json();
+  syncSha = j.sha;
+  return JSON.parse(atob(j.content.replace(/\s/g, "")));
+}
+
+async function ghEnsureBranch() {
+  const head = await fetch(
+    `https://api.github.com/repos/${REPO}/git/refs/heads/${SYNC_BRANCH}`,
+    { headers: ghHeaders() });
+  if (head.ok) return;
+  const main = await fetch(
+    `https://api.github.com/repos/${REPO}/git/refs/heads/main`,
+    { headers: ghHeaders() });
+  if (!main.ok) throw new Error("GitHub " + main.status);
+  const sha = (await main.json()).object.sha;
+  const r = await fetch(`https://api.github.com/repos/${REPO}/git/refs`, {
+    method: "POST", headers: ghHeaders(),
+    body: JSON.stringify({ ref: `refs/heads/${SYNC_BRANCH}`, sha }),
+  });
+  if (!r.ok && r.status !== 422) throw new Error("GitHub " + r.status);
+}
+
+async function ghPutState(file, firstTry = true) {
+  const body = { message: "Синхронизация", branch: SYNC_BRANCH,
+                 content: btoa(JSON.stringify(file)) };
+  if (syncSha) body.sha = syncSha;
+  const r = await fetch(
+    `https://api.github.com/repos/${REPO}/contents/${SYNC_PATH}`,
+    { method: "PUT", headers: ghHeaders(), body: JSON.stringify(body) });
+  if (r.status === 404 && firstTry) { // ветки ещё нет — создаём
+    await ghEnsureBranch();
+    return ghPutState(file, false);
+  }
+  if (r.status === 409 || r.status === 422) return false; // кто-то успел раньше
+  if (!r.ok) throw new Error("GitHub " + r.status);
+  syncSha = (await r.json()).content.sha;
+  return true;
+}
+
+async function syncNow(retry = true) {
+  if (!ghToken() || !stateKey || syncBusy) return;
+  syncBusy = true;
+  setSyncStatus("syncing");
+  try {
+    const remote = await ghGetState();
+    const lastEdit = Number(localStorage.getItem(LS_LASTEDIT) || 0);
+    if (remote && remote.ct && remote.updatedAt > lastEdit) {
+      const s = await decryptState(remote);
+      applyState(s);
+      localStorage.setItem(LS_LASTEDIT, String(remote.updatedAt));
+      renderAll();
+      toast("Данные обновлены с другого устройства");
+    } else if (lastEdit > (remote?.updatedAt || 0)) {
+      const ok = await ghPutState(await encryptState(collectState()));
+      if (!ok && retry) {
+        syncBusy = false;
+        return syncNow(false);
+      }
+    }
+    localStorage.setItem("fin.lastSync", String(Date.now()));
+    setSyncStatus("ok");
+  } catch (e) {
+    setSyncStatus("error",
+      e.name === "OperationError"
+        ? "Слепок зашифрован другим паролем"
+        : e.message);
+  } finally { syncBusy = false; }
+}
+
+function scheduleSyncPush() {
+  if (!ghToken()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncNow, 4000);
+}
+
+let lastVisSync = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" &&
+      Date.now() - lastVisSync > 30000) {
+    lastVisSync = Date.now();
+    syncNow();
+  }
+});
+
+function openSyncForm() {
+  const body = $("#catSheetBody");
+  body.textContent = "";
+  body.append(el("h3", "", "Синхронизация устройств"));
+  body.append(el("div", "sub",
+    "Зашифрованный слепок операций, категорий и остатков хранится коммитами " +
+    "в вашем же репозитории GitHub. Прочитать его можно только с паролем от сайта."));
+
+  const form = el("div", "form-grid");
+  form.style.marginTop = "14px";
+  const w = el("div");
+  w.append(el("label", "", "Токен GitHub (нужен один раз на устройство)"));
+  const tokIn = el("input");
+  tokIn.type = "password";
+  tokIn.placeholder = "ghp_…";
+  tokIn.value = ghToken();
+  w.append(tokIn);
+  form.append(w);
+
+  const help = el("div", "sub");
+  help.append(document.createTextNode("Создать: "));
+  const a = el("a", "", "github.com/settings/tokens/new");
+  a.href = "https://github.com/settings/tokens/new?scopes=repo&description=finance-sync";
+  a.target = "_blank";
+  a.style.color = "var(--accent)";
+  help.append(a, document.createTextNode(
+    " → галка «repo» уже стоит → Generate token → вставьте сюда. " +
+    "Токен остаётся только в этом браузере."));
+  form.append(help);
+  body.append(form);
+
+  const st = el("div", "sync-status");
+  const last = Number(localStorage.getItem("fin.lastSync") || 0);
+  const note = $("#syncBtn").dataset.note;
+  if ($("#syncBtn").classList.contains("error")) {
+    st.className = "sync-status error";
+    st.textContent = "Ошибка: " + (note || "не удалось синхронизироваться");
+  } else if (ghToken() && last) {
+    st.className = "sync-status ok";
+    st.textContent = "Работает · последняя синхронизация " +
+      new Date(last).toLocaleString("ru-RU");
+  } else {
+    st.textContent = "Пока не настроено на этом устройстве";
+  }
+  body.append(st);
+
+  const actions = el("div", "sheet-actions");
+  if (ghToken()) {
+    const off = el("button", "btn danger", "Отключить");
+    off.onclick = () => {
+      localStorage.removeItem(LS_TOKEN);
+      setSyncStatus("off");
+      closeSheets();
+      toast("Синхронизация отключена");
+    };
+    actions.append(off);
+  }
+  const ok = el("button", "btn primary", "Сохранить и синхронизировать");
+  ok.onclick = async () => {
+    const tok = tokIn.value.trim();
+    if (!tok) { tokIn.focus(); return; }
+    localStorage.setItem(LS_TOKEN, tok);
+    closeSheets();
+    await syncNow();
+    toast($("#syncBtn").classList.contains("ok")
+      ? "Синхронизация работает" : "Не получилось — смотри статус");
+  };
+  actions.append(ok);
+  body.append(actions);
+  openSheet("#catSheet");
+}
+
+$("#syncBtn").onclick = openSyncForm;
 
 function boot(data) {
   BASE_CATEGORIES = data.categories;
@@ -1389,6 +1646,14 @@ function boot(data) {
   renderPeriodNote();
   renderAll();
   fetchRates();
+  // данные, накопленные до появления синка, считаем свежей правкой —
+  // иначе пустое устройство могло бы затереть их своим пустым слепком
+  if (!localStorage.getItem(LS_LASTEDIT) &&
+      SYNC_KEYS.some((k) => localStorage.getItem(k) !== null)) {
+    localStorage.setItem(LS_LASTEDIT, String(Date.now()));
+  }
+  if (ghToken()) syncNow();
+  else setSyncStatus("off");
 }
 
 async function tryUnlock(password, remember, silent) {

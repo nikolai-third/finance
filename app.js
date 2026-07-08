@@ -4,6 +4,7 @@
 
 const LS = {
   cats: "fin.customCats",
+  catEdits: "fin.catEdits",
   overrides: "fin.overrides",
   fx: "fin.fx",
   manual: "fin.manualTxs",
@@ -54,6 +55,7 @@ let monthsInData = [];
 let lastDate = "";
 
 let customCats = load(LS.cats, []);
+let catEdits = load(LS.catEdits, {});   // правки встроенных категорий
 let overrides = load(LS.overrides, {});
 let fxMap = load(LS.fx, {});
 let manualTxs = load(LS.manual, []);
@@ -61,17 +63,26 @@ let roundupOn = load(LS.roundup, true);
 
 const txKey = (t) => `${t.date}|${t.time || ""}|${t.amount}|${t.desc}`;
 
-function allCats() { return [...customCats, ...BASE_CATEGORIES]; }
+function allCats() {
+  return [...customCats, ...BASE_CATEGORIES.map((c) =>
+    catEdits[c.id] ? { ...c, ...catEdits[c.id] } : c)];
+}
 
 function catById(id) { return allCats().find((c) => c.id === id); }
+
+const matchPatterns = (desc, patterns) =>
+  (patterns || []).some((p) =>
+    p && desc.toLowerCase().includes(p.toLowerCase()));
 
 function effectiveCat(t) {
   const ov = overrides[txKey(t)];
   if (ov && catById(ov)) return ov;
   for (const c of customCats) {
-    for (const p of c.patterns || []) {
-      if (p && t.desc.toLowerCase().includes(p.toLowerCase())) return c.id;
-    }
+    if (matchPatterns(t.desc, c.patterns)) return c.id;
+  }
+  // доп. правила, дописанные к встроенным категориям
+  for (const [id, e] of Object.entries(catEdits)) {
+    if (e.patterns && matchPatterns(t.desc, e.patterns)) return id;
   }
   return t.cat;
 }
@@ -112,6 +123,24 @@ function migrate() {
   save("fin.migr1", true);
 }
 
+/* Категории перекладывания денег между своими счетами («на копилку»,
+   «вывод с кредитки») — это переводы, не траты и не доходы. */
+function migrate2() {
+  if (load("fin.migr2", false)) return;
+  let changed = false;
+  for (const c of customCats) {
+    if (c.kind !== "transfer" && /копилк|кредитк|вывод/i.test(c.name)) {
+      c.kind = "transfer";
+      changed = true;
+    }
+  }
+  if (changed) {
+    save(LS.cats, customCats);
+    recompute();
+  }
+  save("fin.migr2", true);
+}
+
 function rebuildTxs() {
   txs = [...RAW.map((t) => ({ ...t })),
          ...manualTxs.map((t) => ({ ...t, manual: true }))];
@@ -150,8 +179,10 @@ function inRange(t) {
 function inKind(t) {
   const kind = (catById(t.ecat) || {}).kind || "spending";
   switch (state.kind) {
-    case "spending": return kind === "spending" && t.amount < 0;
-    case "income": return t.amount > 0;
+    // плюсовые операции в категориях трат — возмещения (друзья скинули за
+    // каршеринг, возврат покупки): показываются в тратах и уменьшают их
+    case "spending": return kind === "spending";
+    case "income": return t.amount > 0 && kind === "income";
     case "transfer": return kind === "transfer";
     default: return true;
   }
@@ -231,8 +262,12 @@ function renderKpis() {
   if (state.kind === "spending") {
     const byCat = groupSum(list);
     const top = [...byCat.entries()].sort((a, b) => b[1] - a[1])[0];
-    tile("Потрачено", rub0(out), plurOps(list.length));
-    tile("В день", rub0(out / days), `за ${days} дн. с тратами`);
+    const reimb = list.filter((t) => amountOf(t) > 0)
+      .reduce((s, t) => s + amountOf(t), 0);
+    const net = out - reimb;
+    tile("Потрачено", rub0(net), plurOps(list.length) +
+      (reimb > 0 ? ` · возмещения −${rub0(reimb)}` : ""));
+    tile("В день", rub0(net / days), `за ${days} дн. с тратами`);
     if (top) {
       const c = catById(top[0]);
       tile("Топ категория", `${c.emoji} ${rub0(top[1])}`, c.name);
@@ -266,10 +301,12 @@ function renderKpis() {
   }
 }
 
-function groupSum(list) {
+/* В режиме трат суммы нетто: плюсовые возмещения вычитаются из категории */
+function groupSum(list, net = state.kind === "spending") {
   const m = new Map();
   for (const t of list) {
-    m.set(t.ecat, (m.get(t.ecat) || 0) + Math.abs(amountOf(t)));
+    const v = net ? -amountOf(t) : Math.abs(amountOf(t));
+    m.set(t.ecat, (m.get(t.ecat) || 0) + v);
   }
   return m;
 }
@@ -292,9 +329,13 @@ function renderChart() {
   // месяц × категория → сумма (по модулю)
   const perMonth = new Map();
   for (const m of monthsInData) perMonth.set(m, new Map());
+  const netMode = state.kind === "spending";
   for (const t of list) {
     const mm = perMonth.get(t.date.slice(0, 7));
-    if (mm) mm.set(t.ecat, (mm.get(t.ecat) || 0) + Math.abs(amountOf(t)));
+    if (mm) {
+      mm.set(t.ecat, (mm.get(t.ecat) || 0) +
+        (netMode ? -amountOf(t) : Math.abs(amountOf(t))));
+    }
   }
 
   // топ-7 категорий за период, остальное (и «Прочее») — в серую «Остальное»
@@ -465,12 +506,12 @@ function renderCats() {
     row.append(el("div", "cat-emoji", c.emoji));
     const mid = el("div", "cat-mid");
     const nm = el("div", "cat-name", c.name);
-    if (!c.builtin) {
-      const mark = el("span", "custom-mark", "своя");
-      mark.title = "Нажмите, чтобы изменить";
-      mark.onclick = (e) => { e.stopPropagation(); openCatForm(c); };
-      nm.append(mark);
-    }
+    if (!c.builtin) nm.append(el("span", "custom-mark", "своя"));
+    const edit = el("span", "cat-edit", "✎");
+    edit.title = "Изменить категорию";
+    edit.setAttribute("role", "button");
+    edit.onclick = (e) => { e.stopPropagation(); openCatForm(c); };
+    nm.append(edit);
     const bar = el("div", "cat-bar");
     const fill = el("i");
     fill.style.width = (100 * sum / maxSum).toFixed(1) + "%";
@@ -636,7 +677,10 @@ function openTxSheet(t, triage) {
   for (const k of kindsOrder) {
     const cats = allCats().filter((c) => (c.kind || "spending") === k);
     if (!cats.length) continue;
-    sec.append(el("div", "pick-kind", KIND_NAMES[k]));
+    sec.append(el("div", "pick-kind",
+      k === "spending" && t.amount > 0
+        ? "Траты · как возмещение, уменьшит траты категории"
+        : KIND_NAMES[k]));
     const pick = el("div", "cat-pick");
     for (const c of cats) {
       const b = el("button", t.ecat === c.id ? "on" : "");
@@ -814,8 +858,13 @@ function openCatForm(existing, forTx, triage) {
   }
   f("Цвет", colorWrap);
 
-  const patIn = f("Правила (необязательно)", el("textarea"));
-  patIn.value = (existing?.patterns || []).join("\n");
+  const isBuiltin = !!existing?.builtin;
+  const patIn = f(isBuiltin
+    ? "Свои правила (добавляются к встроенным)"
+    : "Правила (необязательно)", el("textarea"));
+  patIn.value = (isBuiltin
+    ? catEdits[existing.id]?.patterns || []
+    : existing?.patterns || []).join("\n");
   if (forTx) {
     // название мерчанта — осмысленное правило; для переводов и доходов
     // первое слово описания слишком общее, ничего не подставляем
@@ -827,7 +876,7 @@ function openCatForm(existing, forTx, triage) {
   body.append(form);
 
   const actions = el("div", "sheet-actions");
-  if (existing) {
+  if (existing && !isBuiltin) {
     const del = el("button", "btn danger", "Удалить");
     del.onclick = () => {
       customCats = customCats.filter((c) => c.id !== existing.id);
@@ -843,13 +892,31 @@ function openCatForm(existing, forTx, triage) {
     };
     actions.append(del);
   }
+  if (isBuiltin && catEdits[existing.id]) {
+    const reset = el("button", "btn danger", "Сбросить правки");
+    reset.onclick = () => {
+      delete catEdits[existing.id];
+      save(LS.catEdits, catEdits);
+      recompute();
+      closeSheets();
+      toast("Категория как из коробки");
+      renderAll();
+    };
+    actions.append(reset);
+  }
   const okBtn = el("button", "btn primary", existing ? "Сохранить" : "Создать");
   okBtn.onclick = () => {
     const name = nameIn.value.trim();
     if (!name) { nameIn.focus(); return; }
     const patterns = patIn.value.split("\n").map((s) => s.trim())
       .filter((s) => s.length >= 3);
-    if (existing) {
+    if (isBuiltin) {
+      catEdits[existing.id] = {
+        name, emoji: emojiIn.value.trim() || existing.emoji,
+        kind: kindSel.value, slot, patterns,
+      };
+      save(LS.catEdits, catEdits);
+    } else if (existing) {
       Object.assign(existing, {
         name, emoji: emojiIn.value.trim() || "🏷️", kind: kindSel.value,
         slot, patterns,
@@ -1059,6 +1126,7 @@ function boot(data) {
   RAW = data.transactions;
   rebuildTxs();
   migrate();
+  migrate2();
   $("#roundupToggle").checked = roundupOn;
   $("#lock").hidden = true;
   renderPeriodNote();

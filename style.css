@@ -156,6 +156,8 @@ body {
 .cat-mid { min-width: 0; }
 .cat-name { font-size: 15px; font-weight: 550; display: flex; align-items: center; gap: 6px; }
 .cat-name .custom-mark { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 0 5px; }
+.cat-edit { color: var(--ink-3); font-size: 14px; cursor: pointer; padding: 0 5px; }
+.cat-edit:hover { color: var(--accent); }
 .cat-bar { height: 6px; border-radius: 4px; background: var(--grid); margin-top: 5px; overflow: hidden; }
 .cat-bar i { display: block; height: 100%; border-radius: 4px; }
 .cat-sum { font-size: 15px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }

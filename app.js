@@ -207,14 +207,34 @@ const amountRub = (t) => {
    какие операции добавлены после последней правки остатков */
 const tsOf = (t) => parseInt((t.id || "").slice(1), 36) || 0;
 
-function accountBalance() {
-  const base = load(LS.account, null);
-  const anchor = base?.amt ?? META.balance ?? 0;
-  const asOf = base?.asOf ?? 0;
-  return anchor + manualTxs
-    .filter((t) => (t.src || "account") === "account" && tsOf(t) > asOf)
-    .reduce((s, t) => s + t.amount, 0);
+/* банк округляет каждую карточную трату вверх до кратных 100 ₽,
+   разница уходит в Инвесткопилку — считаем это и для ручных операций */
+function roundupOf(t) {
+  if (!roundupOn || (t.src || "account") !== "account" || t.amount >= 0) {
+    return 0;
+  }
+  const kind = (catById(effectiveCat(t)) || {}).kind || "spending";
+  if (kind !== "spending") return 0;
+  const cents = Math.round(-t.amount * 100);
+  return ((10000 - (cents % 10000)) % 10000) / 100;
 }
+
+function accountState() {
+  const base = load(LS.account, null);
+  let balance = base?.amt ?? META.balance ?? 0;
+  const asOf = base?.asOf ?? 0;
+  let kopilka = 0;
+  for (const t of manualTxs) {
+    if ((t.src || "account") !== "account" || tsOf(t) <= asOf) continue;
+    const ru = roundupOf(t);
+    balance += t.amount - ru;
+    kopilka += ru;
+  }
+  return { balance: Math.round(balance * 100) / 100,
+           kopilka: Math.round(kopilka * 100) / 100 };
+}
+
+const accountBalance = () => accountState().balance;
 
 function cashBalances() {
   const out = {};
@@ -308,8 +328,11 @@ function renderMoney() {
     box.append(r);
   };
 
-  const acc = accountBalance();
+  const { balance: acc, kopilka } = accountState();
   row("На счету Т-Банка", rub0(acc));
+  if (kopilka > 0) {
+    row("Ушло в копилку округлениями", "+" + rub(kopilka));
+  }
   let total = acc;
   let noRate = false;
 
@@ -843,6 +866,12 @@ function openTxSheet(t, triage) {
     body.append(el("div", "sub",
       `включая ${rub(t.ru)} округления в Инвесткопилку (сама покупка ${rub(-t.amount)})`));
   }
+  const mru = t.manual ? roundupOf(t) : 0;
+  if (mru > 0) {
+    body.append(el("div", "sub",
+      `со счёта спишется ${rub(-t.amount + mru)}: ` +
+      `${rub(-t.amount)} трата + ${rub(mru)} в копилку округлением`));
+  }
   const exFx = fxMap[txKey(t)];
   if (exFx) body.append(el("div", "sub", `конвертировано: ${fxStr(exFx)}`));
   body.append(el("div", "sub", t.desc));
@@ -1263,8 +1292,9 @@ $("#csvBtn").onclick = () => {
     const f = fxMap[txKey(t)];
     const native = t.cur && t.cur !== "RUB" ? `${t.amount} ${t.cur}`
       : f ? `${f.amt} ${f.cur}` : "";
+    const ruCsv = roundupOn ? (t.ru || (t.manual ? roundupOf(t) : 0)) : 0;
     csv += `${t.date};${t.time || ""};${String(amountRub(t)).replace(".", ",")};` +
-      `${roundupOn && t.ru ? String(t.ru).replace(".", ",") : ""};` +
+      `${ruCsv ? String(ruCsv).replace(".", ",") : ""};` +
       `${c.name || ""};${native};` +
       `"${t.desc.replace(/"/g, '""')}"\n`;
   }
@@ -1355,8 +1385,6 @@ function boot(data) {
   migrate();
   migrate2();
   $("#roundupToggle").checked = roundupOn;
-  // галка округления имеет смысл только пока в данных есть спаренные копилки
-  $(".roundup-row").hidden = !txs.some((t) => t.ru);
   $("#lock").hidden = true;
   renderPeriodNote();
   renderAll();

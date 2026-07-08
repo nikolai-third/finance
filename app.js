@@ -9,6 +9,9 @@ const LS = {
   fx: "fin.fx",
   manual: "fin.manualTxs",
   roundup: "fin.roundup",
+  cash: "fin.cash",       // остатки наличных по валютам {cur: {amt, asOf}}
+  account: "fin.account", // ручная правка остатка на счёте {amt, asOf}
+  rates: "fin.rates",     // кэш курса ЦБ РФ
 };
 
 const FX_CURRENCIES = [
@@ -156,6 +159,77 @@ const amountOf = (t) =>
   roundupOn && t.ru ? Math.round((t.amount - t.ru) * 100) / 100 : t.amount;
 const visibleTx = (t) => !(roundupOn && t.pr !== undefined);
 
+/* ---------- курс валют (ЦБ РФ) и остатки ---------- */
+
+let rates = load(LS.rates, null);
+
+async function fetchRates() {
+  if (rates && Date.now() - rates.fetched < 6 * 3600e3) return;
+  try {
+    const r = await fetch("https://www.cbr-xml-daily.ru/daily_json.js");
+    const j = await r.json();
+    const map = {};
+    for (const [k, v] of Object.entries(j.Valute)) map[k] = v.Value / v.Nominal;
+    rates = { fetched: Date.now(), date: (j.Date || "").slice(0, 10),
+              src: "ЦБ РФ", map };
+  } catch {
+    try {
+      // запасной источник, если ЦБ недоступен
+      const r = await fetch("https://open.er-api.com/v6/latest/RUB");
+      const j = await r.json();
+      const map = {};
+      for (const [k, v] of Object.entries(j.rates || {})) {
+        if (v > 0) map[k] = 1 / v;
+      }
+      rates = { fetched: Date.now(),
+                date: (j.time_last_update_utc || "").slice(5, 16),
+                src: "er-api", map };
+    } catch { return; /* совсем нет сети — остаёмся на кэше */ }
+  }
+  save(LS.rates, rates);
+  renderAll();
+}
+
+function rate(cur) {
+  if (!cur || cur === "RUB") return 1;
+  return rates?.map?.[cur === "USDT" ? "USD" : cur] ?? null;
+}
+
+/* операции в валюте (наличные) пересчитываем в ₽ для статистики */
+const amountRub = (t) => {
+  const a = amountOf(t);
+  if (!t.cur || t.cur === "RUB") return a;
+  const r = rate(t.cur);
+  return r ? Math.round(a * r * 100) / 100 : 0;
+};
+
+/* id ручной операции — "m" + timestamp в base36; по нему считаем,
+   какие операции добавлены после последней правки остатков */
+const tsOf = (t) => parseInt((t.id || "").slice(1), 36) || 0;
+
+function accountBalance() {
+  const base = load(LS.account, null);
+  const anchor = base?.amt ?? META.balance ?? 0;
+  const asOf = base?.asOf ?? 0;
+  return anchor + manualTxs
+    .filter((t) => (t.src || "account") === "account" && tsOf(t) > asOf)
+    .reduce((s, t) => s + t.amount, 0);
+}
+
+function cashBalances() {
+  const out = {};
+  for (const [cur, e] of Object.entries(load(LS.cash, {}))) {
+    out[cur] = { amt: e.amt, asOf: e.asOf || 0 };
+  }
+  for (const t of manualTxs) {
+    if ((t.src || "account") !== "cash") continue;
+    const cur = t.cur || "RUB";
+    const e = out[cur] || (out[cur] = { amt: 0, asOf: 0 });
+    if (tsOf(t) > e.asOf) e.amt = Math.round((e.amt + t.amount) * 100) / 100;
+  }
+  return out;
+}
+
 /* ---------- состояние фильтров ---------- */
 
 const state = {
@@ -219,6 +293,134 @@ function toast(msg) {
   toastTimer = setTimeout(() => { t.hidden = true; }, 2200);
 }
 
+/* ---------- «Мои деньги» ---------- */
+
+function renderMoney() {
+  const box = $("#moneyRows");
+  box.textContent = "";
+  const row = (lbl, valNode, cls) => {
+    const r = el("div", "money-row" + (cls ? " " + cls : ""));
+    r.append(el("span", "m-lbl", lbl));
+    const v = el("span", "m-val");
+    if (typeof valNode === "string") v.textContent = valNode;
+    else v.append(...valNode);
+    r.append(v);
+    box.append(r);
+  };
+
+  const acc = accountBalance();
+  row("На счету Т-Банка", rub0(acc));
+  let total = acc;
+  let noRate = false;
+
+  const cash = cashBalances();
+  const curs = Object.keys(cash).filter((c) => Math.abs(cash[c].amt) > 0.004)
+    .sort((a, b) => (a === "RUB" ? -1 : b === "RUB" ? 1 : a.localeCompare(b)));
+  if (!curs.length) {
+    row("Наличные", "не указаны — ✎ Остатки");
+  }
+  for (const cur of curs) {
+    const amt = cash[cur].amt;
+    if (cur === "RUB") {
+      total += amt;
+      row("Наличные ₽", rub0(amt));
+    } else {
+      const r = rate(cur);
+      const inRub = r ? amt * r : null;
+      if (inRub != null) total += inRub; else noRate = true;
+      const parts = [document.createTextNode(
+        `${fmtMoney.format(amt)} ${fxSym(cur)}`)];
+      if (inRub != null) parts.push(el("span", "approx", `≈ ${rub0(inRub)}`));
+      row(`Наличные ${fxSym(cur)}`, parts);
+    }
+  }
+  row("Итого", `≈ ${rub0(total)}`, "total");
+
+  $("#rateNote").textContent = rates
+    ? `курс ${rates.src || "ЦБ РФ"} на ${rates.date}` +
+      (noRate ? " · для части валют курса нет, они не в итоге" : "")
+    : "курс валют пока не загрузился — валютные наличные не в итоге";
+}
+
+function openCashForm() {
+  const body = $("#catSheetBody");
+  body.textContent = "";
+  body.append(el("h3", "", "Остатки денег"));
+  body.append(el("div", "sub",
+    "Укажите, сколько денег сейчас. Операции, добавленные после, " +
+    "будут менять эти цифры автоматически."));
+
+  const form = el("div", "form-grid");
+  form.style.marginTop = "14px";
+
+  const accWrap = el("div");
+  accWrap.append(el("label", "", "На счету, ₽"));
+  const accIn = el("input");
+  accIn.type = "number";
+  accIn.step = "0.01";
+  accIn.value = Math.round(accountBalance() * 100) / 100;
+  accWrap.append(accIn);
+  form.append(accWrap);
+
+  const cashWrap = el("div");
+  cashWrap.append(el("label", "", "Наличные"));
+  const rowsBox = el("div");
+  cashWrap.append(rowsBox);
+  const mkRow = (cur, amt) => {
+    const r = el("div", "cash-row");
+    const sel = el("select");
+    for (const [code, sym] of FX_CURRENCIES) {
+      const o = el("option", "", code === sym ? code : `${code} ${sym}`);
+      o.value = code;
+      sel.append(o);
+    }
+    sel.value = cur;
+    const inp = el("input");
+    inp.type = "number";
+    inp.step = "0.01";
+    inp.placeholder = "Сколько";
+    if (amt !== undefined) inp.value = amt;
+    r.append(sel, inp);
+    rowsBox.append(r);
+  };
+  const cash = cashBalances();
+  const existing = Object.keys(cash).filter((c) => cash[c].amt !== 0)
+    .sort((a, b) => (a === "RUB" ? -1 : 1));
+  if (existing.length) {
+    for (const cur of existing) mkRow(cur, Math.round(cash[cur].amt * 100) / 100);
+  } else {
+    mkRow("RUB");
+  }
+  const addBtn = el("button", "btn", "＋ Ещё валюта");
+  addBtn.onclick = () => mkRow("USD");
+  cashWrap.append(addBtn);
+  form.append(cashWrap);
+  body.append(form);
+
+  const actions = el("div", "sheet-actions");
+  const ok = el("button", "btn primary", "Сохранить");
+  ok.onclick = () => {
+    const now = Date.now();
+    const accAmt = parseFloat(accIn.value);
+    if (!Number.isNaN(accAmt)) save(LS.account, { amt: accAmt, asOf: now });
+    const cashOut = {};
+    rowsBox.querySelectorAll(".cash-row").forEach((r) => {
+      const cur = r.querySelector("select").value;
+      const amt = parseFloat(r.querySelector("input").value);
+      if (!Number.isNaN(amt)) {
+        cashOut[cur] = { amt: (cashOut[cur]?.amt || 0) + amt, asOf: now };
+      }
+    });
+    save(LS.cash, cashOut);
+    closeSheets();
+    toast("Остатки обновлены");
+    renderAll();
+  };
+  actions.append(ok);
+  body.append(actions);
+  openSheet("#catSheet");
+}
+
 /* ---------- фильтры (chips) ---------- */
 
 function renderChips() {
@@ -247,9 +449,9 @@ function renderKpis() {
 
   const days = new Set(list.map((t) => t.date)).size || 1;
   const out = list.filter((t) => t.amount < 0)
-    .reduce((s, t) => s - amountOf(t), 0);
+    .reduce((s, t) => s - amountRub(t), 0);
   const inn = list.filter((t) => t.amount > 0)
-    .reduce((s, t) => s + amountOf(t), 0);
+    .reduce((s, t) => s + amountRub(t), 0);
 
   const tile = (lbl, val, sub, pos) => {
     const d = el("div", "tile");
@@ -263,7 +465,7 @@ function renderKpis() {
     const byCat = groupSum(list);
     const top = [...byCat.entries()].sort((a, b) => b[1] - a[1])[0];
     const reimb = list.filter((t) => amountOf(t) > 0)
-      .reduce((s, t) => s + amountOf(t), 0);
+      .reduce((s, t) => s + amountRub(t), 0);
     const net = out - reimb;
     tile("Потрачено", rub0(net), plurOps(list.length) +
       (reimb > 0 ? ` · возмещения −${rub0(reimb)}` : ""));
@@ -285,27 +487,13 @@ function renderKpis() {
       plurOps(list.length), inn - out >= 0);
   }
 
-  // сверка с балансом счёта: якорь — остаток на дату конца выписки;
-  // ручные операции на баланс не влияют
-  if (META.balance != null) {
-    const end = /^\d{4}-\d{2}$/.test(state.range)
-      ? state.range + "-99" : META.balanceDate;
-    const later = RAW.filter((t) => t.date > end)
-      .reduce((s, t) => s + t.amount, 0);
-    const endBal = META.balance - later;
-    const net = RAW.filter((t) => inRange(t))
-      .reduce((s, t) => s + t.amount, 0);
-    tile("На счету", rub0(endBal),
-      (state.range === "all" ? "сейчас" : "на конец периода") +
-      ` · в начале ${rub0(endBal - net)}`);
-  }
 }
 
 /* В режиме трат суммы нетто: плюсовые возмещения вычитаются из категории */
 function groupSum(list, net = state.kind === "spending") {
   const m = new Map();
   for (const t of list) {
-    const v = net ? -amountOf(t) : Math.abs(amountOf(t));
+    const v = net ? -amountRub(t) : Math.abs(amountRub(t));
     m.set(t.ecat, (m.get(t.ecat) || 0) + v);
   }
   return m;
@@ -334,7 +522,7 @@ function renderChart() {
     const mm = perMonth.get(t.date.slice(0, 7));
     if (mm) {
       mm.set(t.ecat, (mm.get(t.ecat) || 0) +
-        (netMode ? -amountOf(t) : Math.abs(amountOf(t))));
+        (netMode ? -amountRub(t) : Math.abs(amountRub(t))));
     }
   }
 
@@ -567,12 +755,16 @@ function renderTxs() {
     const mid = el("div", "tx-mid");
     mid.append(el("div", "tx-desc", cleanDesc(t.desc)));
     const f = fxMap[txKey(t)];
+    const foreign = t.cur && t.cur !== "RUB";
     mid.append(el("div", "tx-cat", (c.name || t.ecat) +
-      (f ? ` → ${fxStr(f)}` : "") + (t.manual ? " · вручную" : "")));
+      (f ? ` → ${fxStr(f)}` : "") +
+      (foreign ? ` · ≈ ${rub0(amountRub(t))}` : "") +
+      (t.manual ? " · вручную" : "")));
     row.append(mid);
     const amt = amountOf(t);
     row.append(el("div", "tx-amt" + (amt > 0 ? " pos" : ""),
-      (amt > 0 ? "+" : "") + rub(amt)));
+      (amt > 0 ? "+" : "") +
+      (foreign ? `${fmtMoney.format(amt)} ${fxSym(t.cur)}` : rub(amt))));
     row.onclick = () => openTxSheet(t);
     box.append(row);
   }
@@ -642,8 +834,11 @@ function openTxSheet(t, triage) {
     (t.time ? ` в ${t.time}` : "") +
     (t.manual ? " · добавлена вручную" : "")));
   const amt = amountOf(t);
+  const foreign = t.cur && t.cur !== "RUB";
   body.append(el("div", "big-amt" + (amt > 0 ? " pos" : ""),
-    (amt > 0 ? "+" : "") + rub(amt)));
+    (amt > 0 ? "+" : "") +
+    (foreign ? `${fmtMoney.format(amt)} ${fxSym(t.cur)}` : rub(amt))));
+  if (foreign) body.append(el("div", "sub", `≈ ${rub0(amountRub(t))} по курсу ЦБ`));
   if (roundupOn && t.ru) {
     body.append(el("div", "sub",
       `включая ${rub(t.ru)} округления в Инвесткопилку (сама покупка ${rub(-t.amount)})`));
@@ -952,7 +1147,7 @@ function openManualTxForm() {
   body.textContent = "";
   body.append(el("h3", "", "Новая операция"));
   body.append(el("div", "sub",
-    "Хранится в этом браузере; на сверку баланса счёта не влияет"));
+    "Хранится в этом браузере и меняет остаток счёта или наличных"));
 
   const form = el("div", "form-grid");
   form.style.marginTop = "14px";
@@ -967,7 +1162,7 @@ function openManualTxForm() {
   dateIn.type = "date";
   dateIn.value = new Date().toISOString().slice(0, 10);
 
-  const amtIn = f("Сумма, ₽", el("input"));
+  const amtIn = f("Сумма", el("input"));
   amtIn.type = "number";
   amtIn.step = "0.01";
   amtIn.min = "0";
@@ -979,6 +1174,24 @@ function openManualTxForm() {
     o.value = v;
     signSel.append(o);
   }
+
+  const srcSel = f("Откуда", el("select"));
+  for (const [v, n] of [["account", "Счёт (карта), ₽"], ["cash", "Наличные"]]) {
+    const o = el("option", "", n);
+    o.value = v;
+    srcSel.append(o);
+  }
+  const curSel = f("Валюта наличных", el("select"));
+  for (const [code, sym] of FX_CURRENCIES) {
+    const o = el("option", "", code === sym ? code : `${code} ${sym}`);
+    o.value = code;
+    curSel.append(o);
+  }
+  curSel.value = "RUB";
+  curSel.parentElement.hidden = true;
+  srcSel.onchange = () => {
+    curSel.parentElement.hidden = srcSel.value !== "cash";
+  };
 
   const descIn = f("Описание", el("input"));
   descIn.type = "text";
@@ -1017,6 +1230,8 @@ function openManualTxForm() {
       amount: (signSel.value === "-" ? -1 : 1) * amt,
       desc: descIn.value.trim(),
       cat: catSel.value,
+      src: srcSel.value,
+      cur: srcSel.value === "cash" ? curSel.value : "RUB",
     });
     save(LS.manual, manualTxs);
     rebuildTxs();
@@ -1030,6 +1245,7 @@ function openManualTxForm() {
 }
 
 $("#addTxBtn").onclick = openManualTxForm;
+$("#cashBtn").onclick = openCashForm;
 $("#triageBtn").onclick = startTriage;
 $("#roundupToggle").onchange = (e) => {
   roundupOn = e.target.checked;
@@ -1041,13 +1257,15 @@ $("#roundupToggle").onchange = (e) => {
 
 $("#csvBtn").onclick = () => {
   const list = filtered().sort((a, b) => a.date.localeCompare(b.date));
-  let csv = "﻿Дата;Время;Сумма;Округление;Категория;Конвертация;Описание\n";
+  let csv = "﻿Дата;Время;Сумма ₽;Округление;Категория;Валюта;Описание\n";
   for (const t of list) {
     const c = catById(t.ecat) || {};
     const f = fxMap[txKey(t)];
-    csv += `${t.date};${t.time || ""};${String(amountOf(t)).replace(".", ",")};` +
+    const native = t.cur && t.cur !== "RUB" ? `${t.amount} ${t.cur}`
+      : f ? `${f.amt} ${f.cur}` : "";
+    csv += `${t.date};${t.time || ""};${String(amountRub(t)).replace(".", ",")};` +
       `${roundupOn && t.ru ? String(t.ru).replace(".", ",") : ""};` +
-      `${c.name || ""};${f ? f.amt + " " + f.cur : ""};` +
+      `${c.name || ""};${native};` +
       `"${t.desc.replace(/"/g, '""')}"\n`;
   }
   const a = document.createElement("a");
@@ -1060,12 +1278,20 @@ $("#csvBtn").onclick = () => {
 /* ---------- шапка и запуск ---------- */
 
 function renderPeriodNote() {
-  const first = txs[0]?.date || "", last = lastDate;
   const f = (d) => {
     const [y, m, dd] = d.split("-");
     return `${Number(dd)} ${MONTHS_SHORT[Number(m) - 1]} ${y}`;
   };
-  $("#periodNote").textContent = first ? `${f(first)} — ${f(last)}` : "";
+  const dates = txs.map((t) => t.date);
+  if (dates.length) {
+    const first = dates.reduce((a, b) => (a < b ? a : b));
+    const last = dates.reduce((a, b) => (a > b ? a : b));
+    $("#periodNote").textContent =
+      first === last ? f(first) : `${f(first)} — ${f(last)}`;
+  } else {
+    $("#periodNote").textContent = META.balanceDate
+      ? `учёт с ${f(META.balanceDate)}` : "";
+  }
 }
 
 let searchTimer;
@@ -1086,6 +1312,7 @@ $("#kindFilter").onchange = (e) => {
 };
 
 function renderAll() {
+  renderMoney();
   renderChips();
   renderKpis();
   renderTriage();
@@ -1128,9 +1355,12 @@ function boot(data) {
   migrate();
   migrate2();
   $("#roundupToggle").checked = roundupOn;
+  // галка округления имеет смысл только пока в данных есть спаренные копилки
+  $(".roundup-row").hidden = !txs.some((t) => t.ru);
   $("#lock").hidden = true;
   renderPeriodNote();
   renderAll();
+  fetchRates();
 }
 
 async function tryUnlock(password, remember, silent) {

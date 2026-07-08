@@ -93,7 +93,28 @@ body {
   display: flex; gap: 8px; align-items: center; font-size: 13.5px;
   color: var(--ink-2); padding: 2px 6px 6px; cursor: pointer;
 }
+.roundup-row[hidden] { display: none; }
 .roundup-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* Мои деньги */
+.money-rows { display: flex; flex-direction: column; gap: 6px; }
+.money-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.money-row .m-lbl { color: var(--ink-2); font-size: 14px; }
+.money-row .m-val { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.money-row .m-val .approx { color: var(--ink-3); font-weight: 400; font-size: 13px; margin-left: 6px; }
+.money-row.total { border-top: 1px solid var(--grid); margin-top: 6px; padding-top: 10px; }
+.money-row.total .m-lbl { color: var(--ink-1); font-weight: 650; }
+.money-row.total .m-val { font-size: 21px; font-weight: 700; font-variant-numeric: normal; }
+.rate-note { color: var(--ink-3); font-size: 12px; margin-top: 8px; }
+
+/* Форма остатков */
+.cash-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.cash-row select { flex: 0 0 118px; }
+.cash-row input, .cash-row select {
+  border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
+  border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 15px; min-width: 0;
+}
+.cash-row input { flex: 1; }
 
 /* Разбор переводов */
 .triage-card { display: flex; align-items: center; gap: 12px; }
@@ -210,14 +231,30 @@ body {
 }
 .cat-pick button.on { border-color: var(--accent); background: var(--surface-1); box-shadow: 0 0 0 1px var(--accent); font-weight: 600; }
 
-/* Форма категории */
+/* Форма категории / операции — единый вид всех контролов */
 .form-grid { display: flex; flex-direction: column; gap: 12px; }
 .form-grid label { font-size: 13px; color: var(--ink-2); display: block; margin-bottom: 4px; }
-.form-grid input[type="text"], .form-grid textarea, .form-grid select {
+.form-grid input, .form-grid textarea, .form-grid select {
   width: 100%; border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
-  border-radius: 10px; padding: 9px 12px; font: inherit; font-size: 15px;
+  border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 15px;
+  -webkit-appearance: none; appearance: none;
 }
 .form-grid textarea { min-height: 74px; resize: vertical; }
+.form-grid select, .search-row select, .fx-form select, .cash-row select {
+  -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%23898781' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 32px;
+}
+.form-grid input[type="date"] { min-height: 42px; }
+.form-grid input[type="date"]::-webkit-calendar-picker-indicator { opacity: .55; }
+.form-grid input[type="number"]::-webkit-outer-spin-button,
+.form-grid input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.form-grid input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.form-grid input:focus, .form-grid select:focus, .form-grid textarea:focus,
+.search-row input:focus, .search-row select:focus {
+  outline: none; border-color: var(--accent);
+}
 .color-pick { display: flex; gap: 8px; flex-wrap: wrap; }
 .color-pick button {
   width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;

@@ -197,7 +197,8 @@ def main():
     # баланс счёта на дату конца выписки — якорь для сверки
     balance = float(sys.argv[3]) if len(sys.argv) > 3 else 3930642.20
     meta = {"balance": balance,
-            "balanceDate": max(r["date"] for r in rows)}
+            "balanceDate": max((r["date"] for r in rows),
+                               default=sys.argv[4] if len(sys.argv) > 4 else "")}
 
     with open(out, "w", encoding="utf-8") as f:
         f.write("// Сгенерировано scripts/categorize.py — не редактировать руками\n")

@@ -23,7 +23,7 @@ const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн"
   "июл", "авг", "сен", "окт", "ноя", "дек"];
 const MONTHS_FULL = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-const KIND_NAMES = { spending: "Траты", transfer: "Переводы", income: "Поступления" };
+const KIND_NAMES = { spending: "Траты", transfer: "Переводы", income: "Доходы" };
 
 const fmtMoney = new Intl.NumberFormat("ru-RU",
   { minimumFractionDigits: 0, maximumFractionDigits: 2 });
@@ -77,6 +77,40 @@ function effectiveCat(t) {
 }
 
 function recompute() { txs.forEach((t) => { t.ecat = effectiveCat(t); }); }
+
+/* Одноразовая чистка: ранние версии подставляли первое слово описания как
+   правило новой категории — для переводов («Перевод», «Пополнение.») это
+   утаскивало в неё сотни операций. Убираем такие правила-пылесосы; сами
+   категории и назначенные вручную операции остаются. Заодно категории,
+   в которых только поступления, помечаем как доходы. */
+function migrate() {
+  if (load("fin.migr1", false)) return;
+  const sweep = ["перевод", "переводы", "пополнение", "внутрибанковский",
+    "внутренний", "внешний", "банковский", "внесение", "снятие", "оплата",
+    "сбп", "кэшбэк", "возврат"];
+  let changed = false;
+  for (const c of customCats) {
+    const kept = (c.patterns || []).filter((p) => {
+      const w = p.toLowerCase().replace(/^[^a-zа-яё0-9]+|[^a-zа-яё0-9]+$/g, "");
+      return w.length >= 3 && !sweep.includes(w);
+    });
+    if (kept.length !== (c.patterns || []).length) {
+      c.patterns = kept;
+      changed = true;
+    }
+    const assigned = txs.filter((t) => overrides[txKey(t)] === c.id);
+    if (assigned.length && c.kind === "spending" &&
+        assigned.every((t) => t.amount > 0)) {
+      c.kind = "income";
+      changed = true;
+    }
+  }
+  if (changed) {
+    save(LS.cats, customCats);
+    recompute();
+  }
+  save("fin.migr1", true);
+}
 
 function rebuildTxs() {
   txs = [...RAW.map((t) => ({ ...t })),
@@ -594,26 +628,37 @@ function openTxSheet(t, triage) {
     sec.append(lbl);
   }
 
-  const pick = el("div", "cat-pick");
   const fxWrap = el("div");
-  for (const c of allCats()) {
-    const b = el("button", t.ecat === c.id ? "on" : "");
-    b.append(el("span", "", c.emoji), el("span", "", c.name));
-    b.onclick = () => {
-      if (c.fx) {
-        pick.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
-        b.classList.add("on");
-        showFxForm(fxWrap, t, c, triage);
-        return;
-      }
-      const n = assignCat(t, c.id, null, bulkBox && bulkBox.checked);
-      toast(n > 1 ? `→ ${c.emoji} ${c.name} · ${plurOps(n)}`
-                  : `→ ${c.emoji} ${c.name}`);
-      afterAssign(triage);
-    };
-    pick.append(b);
+  const kindsOrder = t.amount > 0
+    ? ["income", "spending", "transfer"]
+    : ["spending", "income", "transfer"];
+  const allBtns = [];
+  for (const k of kindsOrder) {
+    const cats = allCats().filter((c) => (c.kind || "spending") === k);
+    if (!cats.length) continue;
+    sec.append(el("div", "pick-kind", KIND_NAMES[k]));
+    const pick = el("div", "cat-pick");
+    for (const c of cats) {
+      const b = el("button", t.ecat === c.id ? "on" : "");
+      b.append(el("span", "", c.emoji), el("span", "", c.name));
+      b.onclick = () => {
+        if (c.fx) {
+          allBtns.forEach((x) => x.classList.remove("on"));
+          b.classList.add("on");
+          showFxForm(fxWrap, t, c, triage);
+          return;
+        }
+        const n = assignCat(t, c.id, null, bulkBox && bulkBox.checked);
+        toast(n > 1 ? `→ ${c.emoji} ${c.name} · ${plurOps(n)}`
+                    : `→ ${c.emoji} ${c.name}`);
+        afterAssign(triage);
+      };
+      allBtns.push(b);
+      pick.append(b);
+    }
+    sec.append(pick);
   }
-  sec.append(pick, fxWrap);
+  sec.append(fxWrap);
   body.append(sec);
 
   const actions = el("div", "sheet-actions");
@@ -634,7 +679,7 @@ function openTxSheet(t, triage) {
     actions.append(del);
   }
   const nb = el("button", "btn", "＋ Новая категория");
-  nb.onclick = () => { closeSheets(); openCatForm(null, t); };
+  nb.onclick = () => { closeSheets(); openCatForm(null, t, triage); };
   actions.append(nb);
   if (triage) {
     const skip = el("button", "btn", "Пропустить →");
@@ -714,12 +759,14 @@ function renderTriage() {
 
 /* ---------- форма категории ---------- */
 
-function openCatForm(existing, forTx) {
+function openCatForm(existing, forTx, triage) {
   const body = $("#catSheetBody");
   body.textContent = "";
   body.append(el("h3", "", existing ? "Изменить категорию" : "Новая категория"));
   body.append(el("div", "sub",
-    "Правила — подстроки описания, по одной на строку. Например: SELFKIOSK"));
+    "Правила — подстроки описания, по одной на строку (например: SELFKIOSK). " +
+    "Правило перекидывает в категорию все операции, где встречается подстрока, " +
+    "поэтому «Перевод» или «Пополнение» писать не стоит."));
 
   const form = el("div", "form-grid");
   form.style.marginTop = "14px";
@@ -748,7 +795,8 @@ function openCatForm(existing, forTx) {
     o.value = v;
     kindSel.append(o);
   }
-  kindSel.value = existing?.kind || "spending";
+  kindSel.value = existing?.kind ||
+    (forTx && forTx.amount > 0 ? "income" : "spending");
 
   const colorWrap = el("div", "color-pick");
   let slot = existing?.slot ?? 1;
@@ -768,7 +816,13 @@ function openCatForm(existing, forTx) {
 
   const patIn = f("Правила (необязательно)", el("textarea"));
   patIn.value = (existing?.patterns || []).join("\n");
-  if (forTx) patIn.value = cleanDesc(forTx.desc).split(" ")[0];
+  if (forTx) {
+    // название мерчанта — осмысленное правило; для переводов и доходов
+    // первое слово описания слишком общее, ничего не подставляем
+    const tKind = (catById(forTx.ecat) || {}).kind || "spending";
+    patIn.value = tKind === "spending" && forTx.amount < 0
+      ? cleanDesc(forTx.desc).split(" ")[0] : "";
+  }
 
   body.append(form);
 
@@ -793,7 +847,8 @@ function openCatForm(existing, forTx) {
   okBtn.onclick = () => {
     const name = nameIn.value.trim();
     if (!name) { nameIn.focus(); return; }
-    const patterns = patIn.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const patterns = patIn.value.split("\n").map((s) => s.trim())
+      .filter((s) => s.length >= 3);
     if (existing) {
       Object.assign(existing, {
         name, emoji: emojiIn.value.trim() || "🏷️", kind: kindSel.value,
@@ -813,7 +868,8 @@ function openCatForm(existing, forTx) {
     recompute();
     closeSheets();
     toast(existing ? "Сохранено" : "Категория создана");
-    renderAll();
+    if (forTx && triage) nextTriage(null);
+    else renderAll();
   };
   actions.append(okBtn);
   body.append(actions);
@@ -862,11 +918,23 @@ function openManualTxForm() {
   descIn.placeholder = "Шаурма за наличные";
 
   const catSel = f("Категория", el("select"));
-  for (const c of allCats()) {
-    const o = el("option", "", `${c.emoji} ${c.name}`);
-    o.value = c.id;
-    catSel.append(o);
+  for (const k of ["spending", "income", "transfer"]) {
+    const cats = allCats().filter((c) => (c.kind || "spending") === k);
+    if (!cats.length) continue;
+    const grp = document.createElement("optgroup");
+    grp.label = KIND_NAMES[k];
+    for (const c of cats) {
+      const o = el("option", "", `${c.emoji} ${c.name}`);
+      o.value = c.id;
+      grp.append(o);
+    }
+    catSel.append(grp);
   }
+  signSel.onchange = () => {
+    const k = signSel.value === "+" ? "income" : "spending";
+    const first = allCats().find((c) => (c.kind || "spending") === k);
+    if (first) catSel.value = first.id;
+  };
   body.append(form);
 
   const actions = el("div", "sheet-actions");
@@ -990,6 +1058,7 @@ function boot(data) {
   META = data.meta || {};
   RAW = data.transactions;
   rebuildTxs();
+  migrate();
   $("#roundupToggle").checked = roundupOn;
   $("#lock").hidden = true;
   renderPeriodNote();

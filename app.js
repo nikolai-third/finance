@@ -59,6 +59,24 @@ function save(key, val) {
   if (!suppressSync && SYNC_KEYS.includes(key)) {
     localStorage.setItem(LS_LASTEDIT, String(Date.now()));
     scheduleSyncPush();
+    updateDirtyBar();
+  }
+}
+
+/* плашка «изменения не сохранены»: локальные правки новее последнего синка */
+function updateDirtyBar() {
+  const bar = document.getElementById("dirtyBar");
+  if (!bar) return;
+  const dirty = Number(localStorage.getItem(LS_LASTEDIT) || 0) >
+    Number(localStorage.getItem("fin.lastSync") || 0);
+  bar.hidden = !dirty;
+  if (dirty) {
+    const hasToken = !!(localStorage.getItem(LS_TOKEN) || "").trim();
+    document.getElementById("dirtyTxt").textContent = hasToken
+      ? "⚠️ Изменения ещё не синхронизированы"
+      : "⚠️ Изменения не сохранены — синхронизация не настроена";
+    document.getElementById("dirtySyncBtn").textContent =
+      hasToken ? "Синхронизировать" : "Настроить";
   }
 }
 
@@ -1371,6 +1389,7 @@ function renderAll() {
   renderChart();
   renderCats();
   renderTxs();
+  updateDirtyBar();
 }
 
 let resizeTimer;
@@ -1543,8 +1562,12 @@ async function syncNow(retry = true) {
         return syncNow(false);
       }
     }
-    localStorage.setItem("fin.lastSync", String(Date.now()));
+    // фиксируем момент правок, которые точно доехали, а не «сейчас» —
+    // правка, сделанная во время push, останется несинхронизированной
+    localStorage.setItem("fin.lastSync",
+      String(Math.max(lastEdit, remote?.updatedAt || 0)));
     setSyncStatus("ok");
+    updateDirtyBar();
   } catch (e) {
     setSyncStatus("error",
       e.name === "OperationError"
@@ -1641,6 +1664,8 @@ function openSyncForm() {
 }
 
 $("#syncBtn").onclick = openSyncForm;
+$("#dirtySyncBtn").onclick = () =>
+  ghToken() ? syncNow() : openSyncForm();
 
 function boot(data) {
   BASE_CATEGORIES = data.categories;

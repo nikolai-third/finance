@@ -116,6 +116,16 @@ body {
 .roundup-row[hidden] { display: none; }
 .roundup-row input { accent-color: var(--accent); width: 16px; height: 16px; }
 
+/* Плашка «не сохранено» */
+.dirty-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid var(--border); border-left: 3px solid #fab219;
+  background: var(--surface-1); border-radius: 12px; padding: 6px 6px 6px 12px;
+  margin: 8px 0; font-size: 13.5px; color: var(--ink-2);
+}
+.dirty-bar[hidden] { display: none; }
+.dirty-bar .btn { white-space: nowrap; }
+
 /* Мои деньги */
 .money-rows { display: flex; flex-direction: column; gap: 6px; }
 .money-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }

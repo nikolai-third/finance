@@ -88,6 +88,30 @@ body {
 .tile .sub { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
 .tile .val.pos { color: var(--good); }
 
+/* Округление в копилку */
+.roundup-row {
+  display: flex; gap: 8px; align-items: center; font-size: 13.5px;
+  color: var(--ink-2); padding: 2px 6px 6px; cursor: pointer;
+}
+.roundup-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* Разбор переводов */
+.triage-card { display: flex; align-items: center; gap: 12px; }
+.triage-txt { flex: 1; font-size: 14.5px; }
+.triage-txt b { font-size: 16px; }
+.triage-txt .sub { color: var(--ink-3); font-size: 12.5px; }
+.head-btns { display: flex; gap: 4px; }
+.triage-progress { font-size: 13px; color: var(--accent); font-weight: 600; margin-bottom: 6px; }
+
+/* Форма валюты и ручной операции */
+.fx-form { display: flex; gap: 8px; margin-top: 10px; }
+.fx-form select, .fx-form input {
+  border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
+  border-radius: 10px; padding: 9px 10px; font: inherit; font-size: 15px; min-width: 0;
+}
+.fx-form input { flex: 1; }
+.fx-note { color: var(--ink-2); font-size: 13.5px; margin-top: 4px; }
+
 /* Карточки */
 .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 16px; padding: 14px; margin: 10px 0; }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; gap: 8px; }

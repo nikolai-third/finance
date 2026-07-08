@@ -31,6 +31,16 @@
 
   <section class="kpis" id="kpis"></section>
 
+  <label class="roundup-row">
+    <input type="checkbox" id="roundupToggle">
+    <span>🐷 Траты с округлением до 100 ₽ — разница уходит в Инвесткопилку</span>
+  </label>
+
+  <section class="card triage-card" id="triageCard" hidden>
+    <div class="triage-txt" id="triageTxt"></div>
+    <button class="btn primary" id="triageBtn">Разобрать</button>
+  </section>
+
   <section class="card">
     <div class="card-head">
       <h2 id="chartTitle">Траты по месяцам</h2>
@@ -50,7 +60,10 @@
   <section class="card">
     <div class="card-head">
       <h2 id="txTitle">Операции</h2>
-      <button class="btn ghost" id="csvBtn">⬇ CSV</button>
+      <div class="head-btns">
+        <button class="btn ghost" id="addTxBtn">＋ Операция</button>
+        <button class="btn ghost" id="csvBtn">⬇ CSV</button>
+      </div>
     </div>
     <div class="tx-list" id="txList"></div>
     <button class="btn wide" id="moreBtn" hidden>Показать ещё</button>

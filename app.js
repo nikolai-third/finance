@@ -5,7 +5,19 @@
 const LS = {
   cats: "fin.customCats",
   overrides: "fin.overrides",
+  fx: "fin.fx",
+  manual: "fin.manualTxs",
+  roundup: "fin.roundup",
 };
+
+const FX_CURRENCIES = [
+  ["USD", "$"], ["EUR", "€"], ["RUB", "₽"], ["GBP", "£"], ["CNY", "¥"],
+  ["TRY", "₺"], ["AMD", "֏"], ["GEL", "₾"], ["KZT", "₸"], ["RSD", "din"],
+  ["THB", "฿"], ["USDT", "USDT"],
+];
+const fxSym = (cur) =>
+  (FX_CURRENCIES.find(([c]) => c === cur) || [cur, cur])[1];
+const fxStr = (fx) => `${fmtMoney.format(fx.amt)} ${fxSym(fx.cur)}`;
 
 const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн",
   "июл", "авг", "сен", "окт", "ноя", "дек"];
@@ -19,6 +31,13 @@ const fmtMoney0 = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
 const rub = (v) => fmtMoney.format(v) + " ₽";
 const rub0 = (v) => fmtMoney0.format(v) + " ₽";
 
+function plur(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  return `${n} ` + (m10 === 1 && m100 !== 11 ? one
+    : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many);
+}
+const plurOps = (n) => plur(n, "операция", "операции", "операций");
+
 function load(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
   catch { return fallback; }
@@ -28,12 +47,17 @@ function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 /* ---------- данные (заполняются после расшифровки) ---------- */
 
 let BASE_CATEGORIES = [];
-let txs = [];
+let META = {};
+let RAW = [];          // операции из выписки (для сверки баланса)
+let txs = [];          // выписка + ручные операции
 let monthsInData = [];
 let lastDate = "";
 
 let customCats = load(LS.cats, []);
 let overrides = load(LS.overrides, {});
+let fxMap = load(LS.fx, {});
+let manualTxs = load(LS.manual, []);
+let roundupOn = load(LS.roundup, true);
 
 const txKey = (t) => `${t.date}|${t.time || ""}|${t.amount}|${t.desc}`;
 
@@ -53,6 +77,21 @@ function effectiveCat(t) {
 }
 
 function recompute() { txs.forEach((t) => { t.ecat = effectiveCat(t); }); }
+
+function rebuildTxs() {
+  txs = [...RAW.map((t) => ({ ...t })),
+         ...manualTxs.map((t) => ({ ...t, manual: true }))];
+  recompute();
+  monthsInData = [...new Set(txs.map((t) => t.date.slice(0, 7)))].sort();
+  lastDate = META.balanceDate ||
+    RAW.reduce((m, t) => (t.date > m ? t.date : m), "");
+}
+
+/* сумма операции с учётом округления в копилку; спаренные копилочные
+   переводы при включённой галке скрываются, их сумма прибавлена к покупке */
+const amountOf = (t) =>
+  roundupOn && t.ru ? Math.round((t.amount - t.ru) * 100) / 100 : t.amount;
+const visibleTx = (t) => !(roundupOn && t.pr !== undefined);
 
 /* ---------- состояние фильтров ---------- */
 
@@ -87,7 +126,7 @@ function inKind(t) {
 function filtered(ignoreCat = false) {
   const q = state.search.trim().toLowerCase();
   return txs.filter((t) =>
-    inRange(t) && inKind(t) &&
+    visibleTx(t) && inRange(t) && inKind(t) &&
     (ignoreCat || !state.cat || t.ecat === state.cat) &&
     (!q || t.desc.toLowerCase().includes(q)));
 }
@@ -143,9 +182,9 @@ function renderKpis() {
 
   const days = new Set(list.map((t) => t.date)).size || 1;
   const out = list.filter((t) => t.amount < 0)
-    .reduce((s, t) => s - t.amount, 0);
+    .reduce((s, t) => s - amountOf(t), 0);
   const inn = list.filter((t) => t.amount > 0)
-    .reduce((s, t) => s + t.amount, 0);
+    .reduce((s, t) => s + amountOf(t), 0);
 
   const tile = (lbl, val, sub, pos) => {
     const d = el("div", "tile");
@@ -158,14 +197,14 @@ function renderKpis() {
   if (state.kind === "spending") {
     const byCat = groupSum(list);
     const top = [...byCat.entries()].sort((a, b) => b[1] - a[1])[0];
-    tile("Потрачено", rub0(out), `${list.length} операций`);
+    tile("Потрачено", rub0(out), plurOps(list.length));
     tile("В день", rub0(out / days), `за ${days} дн. с тратами`);
     if (top) {
       const c = catById(top[0]);
       tile("Топ категория", `${c.emoji} ${rub0(top[1])}`, c.name);
     }
   } else if (state.kind === "income") {
-    tile("Поступило", rub0(inn), `${list.length} операций`, true);
+    tile("Поступило", rub0(inn), plurOps(list.length), true);
     tile("В день", rub0(inn / days), `за ${days} дн.`);
   } else if (state.kind === "transfer") {
     tile("Отправлено", rub0(out), "копилка, брокер, переводы");
@@ -174,14 +213,29 @@ function renderKpis() {
     tile("Поступления", rub0(inn), "", true);
     tile("Расходы", rub0(out));
     tile("Итог", (inn - out >= 0 ? "+" : "−") + rub0(Math.abs(inn - out)),
-      `${list.length} операций`, inn - out >= 0);
+      plurOps(list.length), inn - out >= 0);
+  }
+
+  // сверка с балансом счёта: якорь — остаток на дату конца выписки;
+  // ручные операции на баланс не влияют
+  if (META.balance != null) {
+    const end = /^\d{4}-\d{2}$/.test(state.range)
+      ? state.range + "-99" : META.balanceDate;
+    const later = RAW.filter((t) => t.date > end)
+      .reduce((s, t) => s + t.amount, 0);
+    const endBal = META.balance - later;
+    const net = RAW.filter((t) => inRange(t))
+      .reduce((s, t) => s + t.amount, 0);
+    tile("На счету", rub0(endBal),
+      (state.range === "all" ? "сейчас" : "на конец периода") +
+      ` · в начале ${rub0(endBal - net)}`);
   }
 }
 
 function groupSum(list) {
   const m = new Map();
   for (const t of list) {
-    m.set(t.ecat, (m.get(t.ecat) || 0) + Math.abs(t.amount));
+    m.set(t.ecat, (m.get(t.ecat) || 0) + Math.abs(amountOf(t)));
   }
   return m;
 }
@@ -206,7 +260,7 @@ function renderChart() {
   for (const m of monthsInData) perMonth.set(m, new Map());
   for (const t of list) {
     const mm = perMonth.get(t.date.slice(0, 7));
-    if (mm) mm.set(t.ecat, (mm.get(t.ecat) || 0) + Math.abs(t.amount));
+    if (mm) mm.set(t.ecat, (mm.get(t.ecat) || 0) + Math.abs(amountOf(t)));
   }
 
   // топ-7 категорий за период, остальное (и «Прочее») — в серую «Остальное»
@@ -391,6 +445,16 @@ function renderCats() {
     mid.append(nm, bar);
     const right = el("div", "cat-sum", rub0(sum));
     right.append(el("span", "cat-n", n + " оп."));
+    if (c.fx) {
+      const agg = {};
+      for (const t of list) {
+        const f = t.ecat === c.id && fxMap[txKey(t)];
+        if (f) agg[f.cur] = (agg[f.cur] || 0) + f.amt;
+      }
+      const parts = Object.entries(agg)
+        .map(([cur, amt]) => fxStr({ cur, amt }));
+      if (parts.length) right.append(el("span", "cat-n", "→ " + parts.join(" · ")));
+    }
     row.append(mid, right);
     row.onclick = () => {
       state.cat = state.cat === c.id ? null : c.id;
@@ -427,10 +491,13 @@ function renderTxs() {
     row.append(el("div", "tx-ico", c.emoji || "❔"));
     const mid = el("div", "tx-mid");
     mid.append(el("div", "tx-desc", cleanDesc(t.desc)));
-    mid.append(el("div", "tx-cat", c.name || t.ecat));
+    const f = fxMap[txKey(t)];
+    mid.append(el("div", "tx-cat", (c.name || t.ecat) +
+      (f ? ` → ${fxStr(f)}` : "") + (t.manual ? " · вручную" : "")));
     row.append(mid);
-    row.append(el("div", "tx-amt" + (t.amount > 0 ? " pos" : ""),
-      (t.amount > 0 ? "+" : "") + rub(t.amount)));
+    const amt = amountOf(t);
+    row.append(el("div", "tx-amt" + (amt > 0 ? " pos" : ""),
+      (amt > 0 ? "+" : "") + rub(amt)));
     row.onclick = () => openTxSheet(t);
     box.append(row);
   }
@@ -459,45 +526,190 @@ function closeSheets() {
 }
 $("#backdrop").onclick = closeSheets;
 
-function openTxSheet(t) {
+function untriagedTransfers() {
+  return txs.filter((t) => t.ecat === "transfers" && !(txKey(t) in overrides))
+    .sort((a, b) =>
+      (b.date + (b.time || "")).localeCompare(a.date + (a.time || "")));
+}
+
+function assignCat(t, catId, fx, bulk) {
+  const k = txKey(t);
+  overrides[k] = catId;
+  if (fx) fxMap[k] = fx;
+  else delete fxMap[k];
+  let n = 1;
+  if (bulk) {
+    for (const o of txs) {
+      if (o !== t && o.desc === t.desc && o.ecat === "transfers" &&
+          !(txKey(o) in overrides)) {
+        overrides[txKey(o)] = catId;
+        n++;
+      }
+    }
+  }
+  save(LS.overrides, overrides);
+  save(LS.fx, fxMap);
+  recompute();
+  return n;
+}
+
+function openTxSheet(t, triage) {
   const body = $("#txSheetBody");
   body.textContent = "";
+  if (triage) {
+    body.append(el("div", "triage-progress",
+      `Разбор переводов · осталось ${untriagedTransfers().length}`));
+  }
   const [y, m, d] = t.date.split("-");
   body.append(el("h3", "", cleanDesc(t.desc)));
   body.append(el("div", "sub",
     `${Number(d)} ${MONTHS_FULL[Number(m) - 1].toLowerCase()} ${y}` +
-    (t.time ? ` в ${t.time}` : "")));
-  body.append(el("div", "big-amt" + (t.amount > 0 ? " pos" : ""),
-    (t.amount > 0 ? "+" : "") + rub(t.amount)));
+    (t.time ? ` в ${t.time}` : "") +
+    (t.manual ? " · добавлена вручную" : "")));
+  const amt = amountOf(t);
+  body.append(el("div", "big-amt" + (amt > 0 ? " pos" : ""),
+    (amt > 0 ? "+" : "") + rub(amt)));
+  if (roundupOn && t.ru) {
+    body.append(el("div", "sub",
+      `включая ${rub(t.ru)} округления в Инвесткопилку (сама покупка ${rub(-t.amount)})`));
+  }
+  const exFx = fxMap[txKey(t)];
+  if (exFx) body.append(el("div", "sub", `конвертировано: ${fxStr(exFx)}`));
   body.append(el("div", "sub", t.desc));
 
   const sec = el("div", "sheet-sec");
   sec.append(el("div", "sec-lbl", "Категория — нажмите, чтобы изменить"));
+
+  let bulkBox = null;
+  const same = txs.filter((o) => o.desc === t.desc &&
+    o.ecat === "transfers" && !(txKey(o) in overrides)).length;
+  if (t.ecat === "transfers" && same > 1) {
+    bulkBox = el("input");
+    bulkBox.type = "checkbox";
+    const lbl = el("label", "remember");
+    lbl.style.justifyContent = "flex-start";
+    lbl.style.marginBottom = "10px";
+    lbl.append(bulkBox, document.createTextNode(
+      ` сразу ко всем «${cleanDesc(t.desc)}» (${same} шт.)`));
+    sec.append(lbl);
+  }
+
   const pick = el("div", "cat-pick");
+  const fxWrap = el("div");
   for (const c of allCats()) {
     const b = el("button", t.ecat === c.id ? "on" : "");
     b.append(el("span", "", c.emoji), el("span", "", c.name));
     b.onclick = () => {
-      const k = txKey(t);
-      if (c.id === t.cat) delete overrides[k];
-      else overrides[k] = c.id;
-      save(LS.overrides, overrides);
-      recompute();
-      closeSheets();
-      toast(`→ ${c.emoji} ${c.name}`);
-      renderAll();
+      if (c.fx) {
+        pick.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        showFxForm(fxWrap, t, c, triage);
+        return;
+      }
+      const n = assignCat(t, c.id, null, bulkBox && bulkBox.checked);
+      toast(n > 1 ? `→ ${c.emoji} ${c.name} · ${plurOps(n)}`
+                  : `→ ${c.emoji} ${c.name}`);
+      afterAssign(triage);
     };
     pick.append(b);
   }
-  sec.append(pick);
+  sec.append(pick, fxWrap);
   body.append(sec);
 
   const actions = el("div", "sheet-actions");
-  const nb = el("button", "btn", "＋ Новая категория для этой операции");
+  if (t.manual) {
+    const del = el("button", "btn danger", "Удалить");
+    del.onclick = () => {
+      manualTxs = manualTxs.filter((o) => o.id !== t.id);
+      delete overrides[txKey(t)];
+      delete fxMap[txKey(t)];
+      save(LS.manual, manualTxs);
+      save(LS.overrides, overrides);
+      save(LS.fx, fxMap);
+      rebuildTxs();
+      closeSheets();
+      toast("Операция удалена");
+      renderAll();
+    };
+    actions.append(del);
+  }
+  const nb = el("button", "btn", "＋ Новая категория");
   nb.onclick = () => { closeSheets(); openCatForm(null, t); };
   actions.append(nb);
+  if (triage) {
+    const skip = el("button", "btn", "Пропустить →");
+    skip.onclick = () => nextTriage(t);
+    actions.append(skip);
+  }
   body.append(actions);
   openSheet("#txSheet");
+}
+
+function showFxForm(wrap, t, c, triage) {
+  wrap.textContent = "";
+  const form = el("div", "fx-form");
+  const sel = el("select");
+  for (const [code, sym] of FX_CURRENCIES) {
+    const o = el("option", "", code === sym ? code : `${code} ${sym}`);
+    o.value = code;
+    sel.append(o);
+  }
+  const inp = el("input");
+  inp.type = "number";
+  inp.step = "0.01";
+  inp.min = "0";
+  inp.placeholder = "Сколько получено";
+  const ex = fxMap[txKey(t)];
+  if (ex) { sel.value = ex.cur; inp.value = ex.amt; }
+  const ok = el("button", "btn primary", "ОК");
+  ok.onclick = () => {
+    const amt = parseFloat(inp.value);
+    if (!(amt > 0)) { inp.focus(); return; }
+    assignCat(t, c.id, { cur: sel.value, amt });
+    toast(`→ ${c.emoji} ${c.name} · ${fxStr({ cur: sel.value, amt })}`);
+    afterAssign(triage);
+  };
+  form.append(sel, inp, ok);
+  wrap.append(form,
+    el("div", "fx-note", "В какую сумму и валюту в итоге конвертировался перевод"));
+  inp.focus();
+}
+
+function afterAssign(triage) {
+  if (triage) nextTriage(null);
+  else { closeSheets(); renderAll(); }
+}
+
+let skippedTriage = new Set();
+
+function nextTriage(current) {
+  if (current) skippedTriage.add(txKey(current));
+  const next = untriagedTransfers()
+    .find((t) => !skippedTriage.has(txKey(t)));
+  renderAll();
+  if (next) openTxSheet(next, true);
+  else {
+    closeSheets();
+    toast("Все переводы разобраны 🎉");
+  }
+}
+
+function startTriage() {
+  skippedTriage = new Set();
+  const first = untriagedTransfers()[0];
+  if (first) openTxSheet(first, true);
+}
+
+function renderTriage() {
+  const n = untriagedTransfers().length;
+  const card = $("#triageCard");
+  card.hidden = n === 0;
+  if (!n) return;
+  const txt = $("#triageTxt");
+  txt.textContent = "";
+  const b = el("b", "", `Неразобранных переводов: ${n}`);
+  txt.append(b, el("div", "sub",
+    "раскидайте их по категориям — наличные в валюте, долги, своё"));
 }
 
 /* ---------- форма категории ---------- */
@@ -610,15 +822,98 @@ function openCatForm(existing, forTx) {
 
 $("#addCatBtn").onclick = () => openCatForm(null);
 
+/* ---------- ручная операция ---------- */
+
+function openManualTxForm() {
+  const body = $("#catSheetBody");
+  body.textContent = "";
+  body.append(el("h3", "", "Новая операция"));
+  body.append(el("div", "sub",
+    "Хранится в этом браузере; на сверку баланса счёта не влияет"));
+
+  const form = el("div", "form-grid");
+  form.style.marginTop = "14px";
+  const f = (lbl, node) => {
+    const w = el("div");
+    w.append(el("label", "", lbl), node);
+    form.append(w);
+    return node;
+  };
+
+  const dateIn = f("Дата", el("input"));
+  dateIn.type = "date";
+  dateIn.value = new Date().toISOString().slice(0, 10);
+
+  const amtIn = f("Сумма, ₽", el("input"));
+  amtIn.type = "number";
+  amtIn.step = "0.01";
+  amtIn.min = "0";
+  amtIn.placeholder = "500";
+
+  const signSel = f("Тип", el("select"));
+  for (const [v, n] of [["-", "Трата"], ["+", "Поступление"]]) {
+    const o = el("option", "", n);
+    o.value = v;
+    signSel.append(o);
+  }
+
+  const descIn = f("Описание", el("input"));
+  descIn.type = "text";
+  descIn.placeholder = "Шаурма за наличные";
+
+  const catSel = f("Категория", el("select"));
+  for (const c of allCats()) {
+    const o = el("option", "", `${c.emoji} ${c.name}`);
+    o.value = c.id;
+    catSel.append(o);
+  }
+  body.append(form);
+
+  const actions = el("div", "sheet-actions");
+  const ok = el("button", "btn primary", "Добавить");
+  ok.onclick = () => {
+    const amt = parseFloat(amtIn.value);
+    if (!(amt > 0)) { amtIn.focus(); return; }
+    if (!descIn.value.trim()) { descIn.focus(); return; }
+    manualTxs.unshift({
+      id: "m" + Date.now().toString(36),
+      date: dateIn.value || new Date().toISOString().slice(0, 10),
+      time: null,
+      amount: (signSel.value === "-" ? -1 : 1) * amt,
+      desc: descIn.value.trim(),
+      cat: catSel.value,
+    });
+    save(LS.manual, manualTxs);
+    rebuildTxs();
+    closeSheets();
+    toast("Операция добавлена");
+    renderAll();
+  };
+  actions.append(ok);
+  body.append(actions);
+  openSheet("#catSheet");
+}
+
+$("#addTxBtn").onclick = openManualTxForm;
+$("#triageBtn").onclick = startTriage;
+$("#roundupToggle").onchange = (e) => {
+  roundupOn = e.target.checked;
+  save(LS.roundup, roundupOn);
+  renderAll();
+};
+
 /* ---------- CSV ---------- */
 
 $("#csvBtn").onclick = () => {
   const list = filtered().sort((a, b) => a.date.localeCompare(b.date));
-  let csv = "﻿Дата;Время;Сумма;Категория;Описание\n";
+  let csv = "﻿Дата;Время;Сумма;Округление;Категория;Конвертация;Описание\n";
   for (const t of list) {
     const c = catById(t.ecat) || {};
-    csv += `${t.date};${t.time || ""};${String(t.amount).replace(".", ",")};` +
-      `${c.name || ""};"${t.desc.replace(/"/g, '""')}"\n`;
+    const f = fxMap[txKey(t)];
+    csv += `${t.date};${t.time || ""};${String(amountOf(t)).replace(".", ",")};` +
+      `${roundupOn && t.ru ? String(t.ru).replace(".", ",") : ""};` +
+      `${c.name || ""};${f ? f.amt + " " + f.cur : ""};` +
+      `"${t.desc.replace(/"/g, '""')}"\n`;
   }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -644,7 +939,7 @@ $("#search").addEventListener("input", (e) => {
   searchTimer = setTimeout(() => {
     state.search = e.target.value;
     state.limit = 50;
-    renderKpis(); renderCats(); renderTxs();
+    renderKpis(); renderChart(); renderCats(); renderTxs();
   }, 250);
 });
 
@@ -658,6 +953,7 @@ $("#kindFilter").onchange = (e) => {
 function renderAll() {
   renderChips();
   renderKpis();
+  renderTriage();
   renderChart();
   renderCats();
   renderTxs();
@@ -691,10 +987,10 @@ async function decryptData(password) {
 
 function boot(data) {
   BASE_CATEGORIES = data.categories;
-  txs = data.transactions.map((t) => ({ ...t }));
-  recompute();
-  monthsInData = [...new Set(txs.map((t) => t.date.slice(0, 7)))].sort();
-  lastDate = txs.reduce((m, t) => (t.date > m ? t.date : m), "");
+  META = data.meta || {};
+  RAW = data.transactions;
+  rebuildTxs();
+  $("#roundupToggle").checked = roundupOn;
   $("#lock").hidden = true;
   renderPeriodNote();
   renderAll();

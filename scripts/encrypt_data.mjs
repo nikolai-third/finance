@@ -18,6 +18,7 @@ const grab = (name) => {
 const payload = JSON.stringify({
   categories: grab("BASE_CATEGORIES"),
   transactions: grab("TRANSACTIONS"),
+  meta: grab("META"),
 });
 
 const ITER = 600000;

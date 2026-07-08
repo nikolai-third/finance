@@ -551,6 +551,14 @@ function renderChart() {
     transfer: "Переводы по месяцам", all: "Обороты по месяцам",
   }[state.kind];
 
+  if (!list.length) {
+    svg.setAttribute("height", 0);
+    const lg = $("#legend");
+    lg.textContent = "";
+    lg.append(el("span", "key", "Пока нет операций за этот период"));
+    return;
+  }
+
   // месяц × категория → сумма (по модулю)
   const perMonth = new Map();
   for (const m of monthsInData) perMonth.set(m, new Map());

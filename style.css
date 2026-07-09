@@ -79,6 +79,9 @@ body {
 .sync-status { font-size: 13.5px; margin-top: 10px; }
 .sync-status.ok { color: var(--good); }
 .sync-status.error { color: var(--s6); }
+.sync-log { display: flex; flex-direction: column; gap: 3px; }
+.sync-log-row { font-size: 12.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.sync-log-row.bad { color: var(--s6); }
 
 /* Фильтры */
 .filters { position: sticky; top: env(safe-area-inset-top, 0); z-index: 20; background: var(--page); padding: 8px 0; }

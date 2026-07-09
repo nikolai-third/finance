@@ -1588,6 +1588,16 @@ async function ghPutState(file, firstTry = true) {
   return true;
 }
 
+/* журнал последних попыток синхронизации — только на этом устройстве */
+function syncLog(ok, msg) {
+  const log = load("fin.syncLog", []);
+  log.unshift({ t: Date.now(), ok, msg });
+  if (log.length > 30) log.length = 30;
+  localStorage.setItem("fin.syncLog", JSON.stringify(log));
+}
+
+let netRetries = 0;
+
 async function syncNow(retry = true) {
   if (!ghToken() || !stateKey || syncBusy) return;
   syncBusy = true;
@@ -1595,32 +1605,46 @@ async function syncNow(retry = true) {
   try {
     const remote = await ghGetState();
     const lastEdit = Number(localStorage.getItem(LS_LASTEDIT) || 0);
+    let action = "уже синхронизировано";
     if (remote && remote.ct && remote.updatedAt > lastEdit) {
       const s = await decryptState(remote);
       applyState(s);
       localStorage.setItem(LS_LASTEDIT, String(remote.updatedAt));
       renderAll();
       toast("Данные обновлены с другого устройства");
+      action = "получены изменения с другого устройства";
     } else if (lastEdit > (remote?.updatedAt || 0)) {
       const ok = await ghPutState(await encryptState(collectState()));
       if (!ok && retry) {
         syncBusy = false;
         return syncNow(false);
       }
+      action = "изменения отправлены";
     }
     // фиксируем момент правок, которые точно доехали, а не «сейчас» —
     // правка, сделанная во время push, останется несинхронизированной
     localStorage.setItem("fin.lastSync",
       String(Math.max(lastEdit, remote?.updatedAt || 0)));
+    netRetries = 0;
     setSyncStatus("ok");
+    syncLog(true, action);
     updateDirtyBar();
   } catch (e) {
-    setSyncStatus("error",
-      e.name === "OperationError"
-        ? "Слепок зашифрован другим паролем"
-        : e.message);
+    const isNet = e.name === "TypeError"; // Load failed / Failed to fetch
+    const msg = e.name === "OperationError"
+      ? "Слепок зашифрован другим паролем"
+      : isNet ? `нет сети (${e.message})` : e.message;
+    setSyncStatus("error", msg);
+    syncLog(false, msg);
+    // сетевые сбои временные — пробуем ещё до трёх раз с паузой
+    if (isNet && netRetries < 3) {
+      netRetries++;
+      setTimeout(syncNow, 5000 * netRetries);
+    }
   } finally { syncBusy = false; }
 }
+
+addEventListener("online", () => { netRetries = 0; syncNow(); });
 
 function scheduleSyncPush() {
   if (!ghToken()) return;
@@ -1682,6 +1706,22 @@ function openSyncForm() {
     st.textContent = "Пока не настроено на этом устройстве";
   }
   body.append(st);
+
+  const logEntries = load("fin.syncLog", []);
+  if (logEntries.length) {
+    const sec = el("div", "sheet-sec");
+    sec.append(el("div", "sec-lbl", "Журнал (это устройство)"));
+    const box = el("div", "sync-log");
+    for (const e of logEntries.slice(0, 12)) {
+      box.append(el("div", "sync-log-row" + (e.ok ? "" : " bad"),
+        new Date(e.t).toLocaleString("ru-RU",
+          { day: "2-digit", month: "2-digit",
+            hour: "2-digit", minute: "2-digit" }) +
+        " · " + e.msg));
+    }
+    sec.append(box);
+    body.append(sec);
+  }
 
   const actions = el("div", "sheet-actions");
   if (ghToken()) {
